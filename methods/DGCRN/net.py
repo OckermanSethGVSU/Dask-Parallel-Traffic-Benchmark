@@ -43,8 +43,9 @@ class DGCRN(nn.Module):
 
         self.emb1 = nn.Embedding(self.num_nodes, node_dim)
         self.emb2 = nn.Embedding(self.num_nodes, node_dim)
-        self.lin1 = nn.Linear(node_dim, node_dim)
-        self.lin2 = nn.Linear(node_dim, node_dim)
+        
+        # self.lin1 = nn.Linear(node_dim, node_dim)
+        # self.lin2 = nn.Linear(node_dim, node_dim)
 
         self.idx = torch.arange(self.num_nodes).to(device)
 
