@@ -70,10 +70,10 @@ class TrainDataset(Dataset):
         temp_y = []
         temp_ycl = []
         for iter, (x, y, ycl) in enumerate(dataloader.get_iterator()):
-            
-            temp_x.append(x)
-            temp_y.append(y)
-            temp_ycl.append(ycl)
+            for i in range(x.shape[0]):
+                temp_x.append(x[i])
+                temp_y.append(y[i])
+                temp_ycl.append(ycl[i])
 
         self.x = torch.tensor(x).float()
         self.y = torch.tensor(y).float()
@@ -96,10 +96,13 @@ class ValDataset(Dataset):
         temp_y = []
         
         for iter, (x, y) in enumerate(dataloader.get_iterator()):
+            for i in range(x.shape[0]):
+                temp_x.append(x[i])
+                temp_y.append(y[i])
+               
             # print(type(x), type(y))
             # print(x[0])
-            temp_x.append(x)
-            temp_y.append(y) 
+           
 
         self.x = torch.tensor(x).float()
         self.y = torch.tensor(y).float()
@@ -270,7 +273,7 @@ def my_train():
     num_epochs = args.epochs
     batch_size = args.batch_size
     
-    train_sampler = DistributedSampler(train_dataset)
+    train_sampler = DistributedSampler(train_dataset, num_replicas=npar)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler)
 
     val_sampler = DistributedSampler(val_dataset)
