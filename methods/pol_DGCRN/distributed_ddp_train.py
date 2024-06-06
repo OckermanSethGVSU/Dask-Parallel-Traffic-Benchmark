@@ -70,10 +70,10 @@ class TrainDataset(Dataset):
         temp_y = []
         temp_ycl = []
         for iter, (x, y, ycl) in enumerate(dataloader.get_iterator()):
-            
-            temp_x.append(x)
-            temp_y.append(y)
-            temp_ycl.append(ycl)
+           for i in range(x.shape[0]):
+                temp_x.append(x[i])
+                temp_y.append(y[i])
+                temp_ycl.append(ycl[i])
 
         self.x = torch.tensor(x).float()
         self.y = torch.tensor(y).float()
@@ -98,8 +98,9 @@ class ValDataset(Dataset):
         for iter, (x, y) in enumerate(dataloader.get_iterator()):
             # print(type(x), type(y))
             # print(x[0])
-            temp_x.append(x)
-            temp_y.append(y) 
+            for i in range(x.shape[0]):
+                temp_x.append(x[i])
+                temp_y.append(y[i])
 
         self.x = torch.tensor(x).float()
         self.y = torch.tensor(y).float()
@@ -162,16 +163,6 @@ parser.add_argument('--hyperGNN_dim',
                     help='hyperGNN_dim.')
 
 parser.add_argument('--device', type=str, default='cuda:1', help='')
-parser.add_argument('--data',
-                    type=str,
-                    default='data/METR-LA',
-                    help='data path')
-
-parser.add_argument('--adj_data',
-                    type=str,
-                    default='data/sensor_graph/adj_mx.pkl',
-                    help='adj data path')
-parser.add_argument('--propalpha', type=float, default=0.05, help='prop alpha')
 
 parser.add_argument('--cl',
                     type=str_to_bool,
@@ -220,6 +211,20 @@ parser.add_argument('--print_every', type=int, default=50, help='')
 parser.add_argument('--save', type=str, default='./save/', help='save path')
 
 parser.add_argument('--expid', type=str, default='1', help='experiment id')
+parser.add_argument('--scheduler_file_path', type=str, default='1',)
+
+parser.add_argument('--data',
+                    type=str,
+                    default='/home/treewalker/Dask-Parallel-Traffic-Benchmark/methods/pol_DGCRN/data/PEMS-BAY',
+                    help='data path')
+
+parser.add_argument('--adj_data',
+                    type=str,
+                    default='/home/treewalker/Dask-Parallel-Traffic-Benchmark/methods/pol_DGCRN/data/sensor_graph/adj_mx_bay.pkl',
+                    help='adj data path')
+parser.add_argument('--propalpha', type=float, default=0.05, help='prop alpha')
+
+
 
 args = parser.parse_args()
 torch.set_num_threads(3)
@@ -236,13 +241,13 @@ train_dataset = TrainDataset(dataloader['train_loader'])
 val_dataset = ValDataset(dataloader['val_loader'])
 
 device=None
-predefined_A = load_adj(args.adj_data)
-predefined_A = [torch.tensor(adj).to(device) for adj in predefined_A]
+
+
 
 key = uuid.uuid4().hex
 rh = results.DaskResultsHandler(key)
 
-npar=2
+npar=8
 
 
 def main(runid):
@@ -251,14 +256,15 @@ def main(runid):
     
     print("start distributed training...", flush=True)
     
+    prefix = "/home/treewalker/Dask-Parallel-Traffic-Benchmark/methods/pol_DGCRN/"
     
-    
-    
+    # sch_file_prefix = args.scheduler_file_path
+    # print(sch)
     # cluster = LocalCluster(n_workers=npar)
-    client = Client(scheduler_file = "cluster.info")
+    client = Client(scheduler_file = f"cluster.info")
     # order matters - I am preserving the depencies
     for f in ['layer.py', 'net.py', 'util.py', 'uniq_net.py', 'trainer.py',]:
-        client.upload_file(f)
+        client.upload_file(prefix + f)
     futures = dispatch.run(client, my_train, backend="gloo")
     rh.process_results(".", futures, raise_errors=False)
     
@@ -268,17 +274,25 @@ def main(runid):
    
 
 def my_train():
+
     runid = 1
     num_epochs = args.epochs
     batch_size = args.batch_size
     
-    train_sampler = DistributedSampler(train_dataset)
+    worker_rank = int(dist.get_rank())
+
+    device = f"cuda:{worker_rank % 4}"
+    print("Device: ", device, flush=True)
+
+    predefined_A = load_adj(args.adj_data)
+    predefined_A = [torch.tensor(adj).to(device) for adj in predefined_A]
+
+    train_sampler = DistributedSampler(train_dataset, num_replicas=npar, rank=worker_rank)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler)
 
-    val_sampler = DistributedSampler(val_dataset)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=npar, rank=worker_rank)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler)
 
-    worker_rank = int(dist.get_rank())
     model = DGCRN(args.gcn_depth,
                   args.num_nodes,
                   device,
@@ -296,7 +310,7 @@ def my_train():
                   cl_decay_steps=args.cl_decay_steps,
                   rnn_size=rnn_size,
                   hyperGNN_dim=args.hyperGNN_dim)
-    model = DDP(model)
+    model = DDP(model).to(device)
     engine = Trainer(model, args.learning_rate, args.weight_decay, args.clip,
                      args.step_size1, args.seq_out_len, scaler, device,
                      args.cl, args.new_training_method)
@@ -311,10 +325,10 @@ def my_train():
     batches_seen = 0
 
 
+    print("about to start epchs", flush=True)
  
     
-
-
+    train_start = time.time()
     for epoch in range(1, num_epochs + 1):
             
         train_sampler.set_epoch(epoch)
@@ -386,13 +400,16 @@ def my_train():
         his_loss.append(mvalid_loss)
 
         if (epoch - 1) % args.print_every == 0:
-            log = 'Rank: {:02d}, Epoch: {:03d}, Inference Time: {:.4f} secs'
-            print(log.format(worker_rank, epoch, (s2 - s1)))
-            log = 'Rank: {:02d}, Epoch: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, Valid Loss: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, Training Time: {:.4f}/epoch'
-            print(log.format(worker_rank, epoch, mtrain_loss, mtrain_mape, mtrain_rmse,
-                                mvalid_loss, mvalid_mape, mvalid_rmse,
-                                (t2 - t1)),
-                    flush=True)
+            if worker_rank == 0:
+                print("epoch: ", epoch, flush=True)
+                print(f"val - loss: {mvalid_loss}, mape: {mvalid_mape}, rmse: {mvalid_rmse}",flush=True)
+            # log = 'Rank: {:02d}, Epoch: {:03d}, Inference Time: {:.4f} secs'
+            # print(log.format(worker_rank, epoch, (s2 - s1)))
+            # log = 'Rank: {:02d}, Epoch: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, Valid Loss: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, Training Time: {:.4f}/epoch'
+            # print(log.format(worker_rank, epoch, mtrain_loss, mtrain_mape, mtrain_rmse,
+            #                     mvalid_loss, mvalid_mape, mvalid_rmse,
+            #                     (t2 - t1)),
+            #         flush=True)
         if mvalid_loss < minl:
                 # torch.save(
                 #     engine.model.state_dict(), args.save + "exp" +
@@ -404,10 +421,12 @@ def my_train():
             count_lfx += 1
             if count_lfx > tolerance:
                 break
-        
-    print("Rank {:02d} Average Training Time: {:.4f} secs/epoch".format(worker_rank,
-        np.mean(train_time)))
-    print("Rank {:02d} Average Inference Time: {:.4f} secs".format(worker_rank, np.mean(val_time)))
+    train_end = time.time()
+    if worker_rank == 0:
+        print("Total training time: ", train_end - train_start, flush=True)  
+    # print("Rank {:02d} Average Training Time: {:.4f} secs/epoch".format(worker_rank,
+    #     np.mean(train_time)))
+    # print("Rank {:02d} Average Inference Time: {:.4f} secs".format(worker_rank, np.mean(val_time)))
 
         # bestid = np.argmin(his_loss)
         # engine.model.load_state_dict(
