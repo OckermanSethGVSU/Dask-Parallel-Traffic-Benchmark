@@ -8,9 +8,60 @@ from trainer import Trainer
 from net import DGCRN
 import setproctitle
 import os
+from torch.utils.data import Dataset, DataLoader
 
-setproctitle.setproctitle("DGCRN@lifuxian")
+class TrainDataset(Dataset):
+    def __init__(self, dataloader, device=None):
+        temp_x = []
+        temp_y = []
+        temp_ycl = []
+        for iter, (x, y, ycl) in enumerate(dataloader.get_iterator()):
+           for i in range(x.shape[0]):
+                temp_x.append(x[i])
+                temp_y.append(y[i])
+                temp_ycl.append(ycl[i])
 
+        self.x = torch.tensor(x).float()
+        self.y = torch.tensor(y).float()
+        self.ycl = torch.tensor(ycl).float()  
+        self.permute()
+
+    def __getitem__(self, idx):
+        idx = self.permutation[idx]
+        return self.x[idx], self.y[idx], self.ycl[idx]
+
+    def __len__(self):
+        return len(self.x)
+
+    def permute(self):
+        self.permutation = torch.randperm(len(self.x))
+
+class ValDataset(Dataset):
+    def __init__(self, dataloader, device=None):
+        temp_x = []
+        temp_y = []
+        
+        for iter, (x, y) in enumerate(dataloader.get_iterator()):
+            # print(type(x), type(y))
+            # print(x[0])
+            for i in range(x.shape[0]):
+                temp_x.append(x[i])
+                temp_y.append(y[i])
+
+        self.x = torch.tensor(x).float()
+        self.y = torch.tensor(y).float()
+        
+        self.permute()
+
+    def __getitem__(self, idx):
+        idx = self.permutation[idx]
+        return self.x[idx], self.y[idx]
+
+    def __len__(self):
+        return len(self.x)
+
+    def permute(self):
+        self.permutation = torch.randperm(len(self.x))
 
 def str_to_bool(value):
     if isinstance(value, bool):
@@ -117,16 +168,20 @@ parser.add_argument('--save', type=str, default='./save/', help='save path')
 parser.add_argument('--expid', type=str, default='1', help='experiment id')
 
 args = parser.parse_args()
-torch.set_num_threads(3)
+# torch.set_num_threads(3)
 
 os.makedirs(args.save, exist_ok=True)
 
 rnn_size = args.rnn_size
 
 device = torch.device(args.device)
+device=None
 dataloader = load_dataset(args.data, args.batch_size, args.batch_size,
                           args.batch_size)
 scaler = dataloader['scaler']
+train_dataset = TrainDataset(dataloader['train_loader'])
+val_dataset = ValDataset(dataloader['val_loader'])
+
 
 predefined_A = load_adj(args.adj_data)
 predefined_A = [torch.tensor(adj).to(device) for adj in predefined_A]
@@ -174,6 +229,7 @@ def main(runid):
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
 
+    start_time = time.time()
     for i in range(1, args.epochs + 1):
         train_loss = []
         train_mape = []
@@ -238,9 +294,9 @@ def main(runid):
                     flush=True)
 
         if mvalid_loss < minl:
-            torch.save(
-                engine.model.state_dict(), args.save + "exp" +
-                str(args.expid) + "_" + str(runid) + ".pth")
+            # torch.save(
+            #     engine.model.state_dict(), args.save + "exp" +
+            #     str(args.expid) + "_" + str(runid) + ".pth")
             minl = mvalid_loss
             epoch_best = i
             count_lfx = 0
@@ -248,20 +304,9 @@ def main(runid):
             count_lfx += 1
             if count_lfx > tolerance:
                 break
-
-    print("Average Training Time: {:.4f} secs/epoch".format(
-        np.mean(train_time)))
-    print("Average Inference Time: {:.4f} secs".format(np.mean(val_time)))
-
-    bestid = np.argmin(his_loss)
-    engine.model.load_state_dict(
-        torch.load(args.save + "exp" + str(args.expid) + "_" + str(runid) +
-                    ".pth",
-                    map_location='cpu'))
-
-    print("Training finished")
-    print("The valid loss on best model is {}, epoch:{}".format(
-        str(round(his_loss[bestid], 4)), epoch_best))
+    end_time = time.time()
+    print("Total Training Time: ", end_time - start_time)
+    
 
 
 
