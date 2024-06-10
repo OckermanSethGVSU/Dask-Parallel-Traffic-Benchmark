@@ -247,6 +247,7 @@ device=None
 key = uuid.uuid4().hex
 rh = results.DaskResultsHandler(key)
 
+# todo make this a runtime variable
 npar=8
 
 
