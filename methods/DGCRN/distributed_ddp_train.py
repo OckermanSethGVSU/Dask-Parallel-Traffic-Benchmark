@@ -23,6 +23,7 @@ import dask
 from dask.distributed import LocalCluster
 from dask.distributed import Client
 from distributed.worker import logger
+from dask_jobqueue import PBSCluster
 
 import uuid
 import pickle
