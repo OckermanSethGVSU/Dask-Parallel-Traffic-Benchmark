@@ -4,7 +4,7 @@ import argparse
 import time
 from util import *
 from trainer import Trainer
-
+# from dask_preprocess import preproccess
 from uniq_net import DGCRN
 import setproctitle
 import os
@@ -22,7 +22,7 @@ import torch.profiler as profiler
 import seaborn as sns
 import dask
 # from dask_saturn import SaturnCluster
-from dask.distributed import LocalCluster
+from dask.distributed import LocalCluster, wait
 from dask.distributed import Client
 from distributed.worker import logger
 
@@ -39,6 +39,14 @@ from dask.distributed import Variable, Lock
 from dask.distributed import performance_report
 setproctitle.setproctitle("DGCRN@lifuxian")
 from torch.utils.data import DataLoader, Dataset
+
+import dask.array as da
+import dask.dataframe as dd
+from dask.array.lib.stride_tricks import sliding_window_view
+import pandas as pd
+import numpy as np
+import time
+
 
 class FeedForwardNN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
@@ -69,10 +77,10 @@ class RandomDataset(Dataset):
 
 
 class TrainDataset(Dataset):
-    def __init__(self, file_path, device=None):
-         self.x = np.memmap(f"{file_path}/train_x.dat", dtype=np.float32, mode='r', shape=(73568, 12, 11160, 2))
-         self.y = np.memmap(f"{file_path}/train_y.dat", dtype=np.float32, mode='r', shape=(73568, 12, 11160, 2))
-         self.ycl = np.memmap(f"{file_path}/train_ycl.dat", dtype=np.float32, mode='r', shape=(73568, 12, 11160, 2))
+    def __init__(self,x, y, ycl, device=None):
+         self.x = x 
+         self.y = y 
+         self.ycl = ycl
          self.device = device
     def __len__(self):
         # Return the number of samples
@@ -80,15 +88,26 @@ class TrainDataset(Dataset):
 
     def __getitem__(self, idx):
         # Fetch the sample at the specified index
-        x_sample = self.x[idx]
-        y_sample = self.y[idx]
-        ycl_sample = self.ycl[idx]
+        # x_sample = self.x[idx]
+        # y_sample = self.y[idx]
+        # ycl_sample = self.ycl[idx]
         
+        x_sample = self.x[idx].compute()
+        y_sample = self.y[idx].compute()
+        ycl_sample = self.ycl[idx].compute()
+        # print('_____')
+        # print(type(x_sample))
+        # print(x_sample.dtype)
+        # print(type(x_sample[0]))
+        # # print(x_sample[0])
+        # print("____")
+     
         # Convert to PyTorch tensors
-        # print("called")
-        x_tensor = torch.from_numpy(np.copy(x_sample))
-        y_tensor = torch.from_numpy(np.copy(y_sample))
-        ycl_tensor = torch.from_numpy(np.copy(ycl_sample))
+      
+        x_tensor = torch.from_numpy(x_sample)
+        y_tensor = torch.from_numpy(y_sample)
+        ycl_tensor = torch.from_numpy(ycl_sample)
+       
         # print("converted")
         # Move to the specified device if applicable
         if self.device:
@@ -99,9 +118,10 @@ class TrainDataset(Dataset):
         return x_tensor, y_tensor, ycl_tensor
 
 class ValDataset(Dataset):
-    def __init__(self, file_path, device=None):
-         self.x = np.memmap(f"{file_path}/val_x.dat", dtype=np.float32, mode='r', shape=(3425, 12, 207, 2))
-         self.y = np.memmap(f"{file_path}/val_y.dat", dtype=np.float32, mode='r', shape=(3425, 12, 207, 2))
+    def __init__(self, x,y, device=None):
+         self.x = x
+         self.y = y
+         self.device = device
 
     def __len__(self):
         # Return the number of samples
@@ -109,12 +129,14 @@ class ValDataset(Dataset):
 
     def __getitem__(self, idx):
         # Fetch the sample at the specified index
-        x_sample = self.x[idx]
-        y_sample = self.y[idx]
+        x_sample = self.x[idx].compute()
+        y_sample = self.y[idx].compute()
         
         # Convert to PyTorch tensors
+        
         x_tensor = torch.from_numpy(x_sample)
         y_tensor = torch.from_numpy(y_sample)
+        
         
         # Move to the specified device if applicable
         if self.device:
@@ -228,7 +250,7 @@ parser.add_argument('--data',
 
 parser.add_argument('--adj_data',
                     type=str,
-                    default='/home/treewalker/Dask-Parallel-Traffic-Benchmark/methods/pol_DGCRN/data/sensor_graph/adj_mx_bay.pkl',
+                    default='sensor_graph/adj_mx.pkl',
                     help='adj data path')
 parser.add_argument('--propalpha', type=float, default=0.05, help='prop alpha')
 parser.add_argument('--npar', type=int, default=1, help='prop alpha')
@@ -236,64 +258,230 @@ parser.add_argument('--npar', type=int, default=1, help='prop alpha')
 
 
 args = parser.parse_args()
-torch.set_num_threads(3)
+# torch.set_num_threads(3)
 
-os.makedirs(args.save, exist_ok=True)
+# os.makedirs(args.save, exist_ok=True)
 
-rnn_size = args.rnn_size
+
 
 # device = torch.device(args.device)
 
-filepath = "/eagle/projects/radix-io/sockerman/"
+def readPD():
+    # df = pd.read_hdf("/home/seth/Documents/research/Argonne/DCRNN/data/speed.h5", key="df")
+    df = pd.read_hdf("new_speed.h5", key="data")
+    df = df.astype('float32')
+    df.index.freq='5min'  # Manually assign the index frequency
+    df.index.freq = df.index.inferred_freq
+    return df
 
 device=None
 
-
-
-key = uuid.uuid4().hex
-rh = results.DaskResultsHandler(key)
-
-
-npar=args.npar
-
-
+# scaler = dataloader['scaler']
+npar = 1
+file_path = "/home/seth/Documents/research/Argonne/DCRNN/DATA/speed.h5"
+# file_path = "metr-la.h5"
 def main(runid):
     
-    
-    
-    print("start distributed training...", flush=True)
+    start_time = time.time()
+    dask.config.set(**{'array.slicing.split_large_chunks': True})
+    print("start preprocessing...", flush=True)
     
     # prefix = "/home/treewalker/Dask-Parallel-Traffic-Benchmark/methods/pol_DGCRN/"
     
-  
-    client = Client(scheduler_file = f"cluster.info")
+    # # client = Client(scheduler_file = f"cluster.info")
+    # client = Client(cluster)
     # order matters - I am preserving the depencies
 
-    for f in ['layer.py', 'net.py', 'util.py', 'uniq_net.py', 'trainer.py',]:
-        client.upload_file(f)
-    with performance_report(filename="dask-report.html"):
-        futures = dispatch.run(client, my_train, backend="gloo")
-        rh.process_results(".", futures, raise_errors=False)
+    # for f in ['layer.py', 'net.py', 'util.py', 'uniq_net.py', 'trainer.py',]:
+    #     client.upload_file(f)
+    # with performance_report(filename="dask-report.html"):
+    #     futures = dispatch.run(client, my_train, backend="gloo")
+    #     rh.process_results(".", futures, raise_errors=False)
+
+
+    cluster = LocalCluster(n_workers=npar)
+
+    client = Client(cluster)
     
+    from dask.delayed import delayed
+    dfs = delayed(readPD)()
+    df = dd.from_delayed(dfs)
+    # df = df.repartition(npartitions=10)
+     
+
+   
+   
+    
+    num_samples, num_nodes = df.shape
+
+    num_samples = num_samples.compute()
+    
+    x_offsets = np.sort(np.arange(-11, 1, 1))
+    y_offsets = np.sort(np.arange(1, 13, 1))
+    
+    print("\rStep 1a Starting: df.to_dask_array", flush=True)
+    data1 =  df.to_dask_array(lengths=True)
+    # print(data1.shape)
+    data1 = da.expand_dims(data1, axis=-1)
+    data1 = data1.rechunk("auto")
+
+
+
+    print("\rStep 1b Starting: Tiling", flush=True)
+    data2 = da.tile((df.index.values.compute() - df.index.values.compute().astype("datetime64[D]")) / np.timedelta64(1, "D"), [1, num_nodes, 1]).transpose((2, 1, 0))
+    data2 = data2.rechunk((data1.chunks))
+    
+    
+    # print("\rStep 1c Starting: Tiling", end="\n", flush=True)
+    memmap_array = da.concatenate([data1, data2], axis=-1)
+    
+  
+    del df
+    # print("\rStep 1a Done; Step 1b Starting", flush=True)
+
+
+   
+   
+   
+
+    del data1 
+    del data2
+
+    
+    min_t = abs(min(x_offsets))
+    max_t = abs(num_samples - abs(max(y_offsets)))  # Exclusive
+    total = max_t - min_t
+
+    window_size = 12
+    original_shape = memmap_array.shape
+
+    
+    # Define the window shape
+    window_shape = (window_size,) + original_shape[1:]  # (12, 207, 2)
+
+    # Use sliding_window_view to create the sliding windows
+    sliding_windows = sliding_window_view(memmap_array, window_shape).squeeze()
+    # time.sleep(15)
+    # print(sliding_windows.compute().shape)
+    # print(sliding_windows.compute())
+    
+    x_array = sliding_windows[:total]
+    y_array = sliding_windows[window_size:]
+    del memmap_array
+    del sliding_windows
+
+
+   
+
+
+    num_samples = x_array.shape[0]
+    num_test = round(num_samples * 0.2)
+    num_train = round(num_samples * 0.7)
+    num_val = num_samples - num_test - num_train
+
+    
+
+    x_train = x_array[:num_train]
+    y_train = y_array[:num_train]
+    ycl_train = y_array[:num_train]
+
+    # x_train = x_train
+    # y_train = y_train
+    # ycl_train = ycl_train
+
+    # wait([x_train,y_train, ycl_train])
+
+
+    # print("Step 3: Computing Mean and Std-Dev", flush=True)
+    mean = x_train[..., 0].mean()
+    std = x_train[..., 0].std()
+    
+
+    # print("Step 4a: Standardizing Train x Dataset",end="",  flush=True)
+    x_train[..., 0] = (x_train[..., 0] - mean) / std
+    # x_train = x_train)
+    
+    
+    # print("\rStep 4b: Standardizing Train ycl Dataset",  flush=True)
+    ycl_train[..., 0] = (ycl_train[..., 0] - mean) / std
+    # ycl_train = ycl_train)
+    
+   
+
+    x_val = x_array[num_train: num_train + num_val]
+    y_val = y_array[num_train: num_train + num_val]
+
+
+
+    # print("Step 5: Standardizing Validation Dataset")
+    x_val[..., 0] = (x_val[..., 0] - mean) / std
+    
+    # x_val = x_val)
+    print("\rStep 1c: Concat, window, standardize" , flush=True)
+    mean, std, x_train, y_train, ycl_train, x_val, y_val = client.persist([mean, std, x_train, y_train, ycl_train, x_val, y_val])
+    wait([mean, std, x_train, y_train, ycl_train, x_val, y_val])
+    
+    # time.sleep(30)
+    mean = mean.compute()
+    std = std.compute()
+
+    print("Preprocessing complete; Training Starting")
+
+    pre_end = time.time()
+
+    
+    # x_train = x_train.compute()
+    # y_train = y_train.compute()
+    # ycl_train = ycl_train.compute()
+    
+    # x_val = x_val.compute()
+    # y_val = y_val.compute()
+    # wait([x_train, y_train, ycl_train, x_val, y_val])
+    # time.sleep(60)
+    del x_array
+    del y_array
+    
+
+    
+    
+    
+
+    # args = (x_train, y_train, ycl_train, x_val, y_val)
+    
+    futures = dispatch.run(client, my_train, x_train=x_train, mean=mean, std=std, y_train=y_train, ycl_train=ycl_train, x_val=x_val, y_val=y_val, backend='gloo')
+    key = uuid.uuid4().hex
+    rh = results.DaskResultsHandler(key)
+    rh.process_results(".", futures, raise_errors=False)
    
     client.shutdown()
+    end_time = time.time()
+    
+    with open("stats.txt", "a") as file:
+        file.write(f"total_time: {end_time - start_time}\n")
+        file.write(f"pre_processing_time: {pre_end - start_time}\n")
+        file.write(f"training_time: {end_time - pre_end}\n")
     
    
 
-def my_train():
+def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None, mean=None, std=None):
 
-    scaler = StandardScaler(mean=63.063625,std=9.004499190013142)
-    train_dataset = TrainDataset(f"{filepath}")
-    val_dataset = ValDataset(f"{filepath}")
+    
+    
 
+    # return None
+    scaler = StandardScaler(mean=mean, std=std)
+    train_dataset = TrainDataset(x_train, y_train, ycl_train)
+    val_dataset = ValDataset(x_val, y_val)
+    
     runid = 1
     num_epochs = args.epochs
     batch_size = args.batch_size
+
     
     worker_rank = int(dist.get_rank())
 
-    device = f"cuda:{worker_rank % 4}"
-    print("Device: ", device, flush=True)
+    # device = f"cuda:{worker_rank % 4}"
+    # print("Device: ", device, flush=True)
     
     predefined_A = load_adj(args.adj_data)
     predefined_A = [torch.tensor(adj).to(device) for adj in predefined_A]
@@ -319,7 +507,7 @@ def my_train():
                 list_weight=[0.05, 0.95, 0.95],
                 tanhalpha=args.tanhalpha,
                 cl_decay_steps=args.cl_decay_steps,
-                rnn_size=rnn_size,
+                rnn_size=args.rnn_size,
                 hyperGNN_dim=args.hyperGNN_dim)
     model = DDP(model).to(device)
     engine = Trainer(model, args.learning_rate, args.weight_decay, args.clip,
@@ -343,7 +531,7 @@ def my_train():
     print("about to start epochs", flush=True)
 
     
-    train_start = time.time()
+    # train_start = time.time()
     for epoch in range(1, num_epochs + 1):
             
         train_sampler.set_epoch(epoch)
@@ -357,13 +545,14 @@ def my_train():
     
         
         for i, (x, y, ycl) in enumerate(train_loader):
-            print(f"Starting batch {i}",flush=True)
-            trainx = torch.Tensor(x).to(device)
+
+            print(f"working on batch {i}")
+            trainx = torch.Tensor(x.float()).to(device)
             trainx = trainx.transpose(1, 3)
-            trainy = torch.Tensor(y).to(device)
+            trainy = torch.Tensor(y.float()).to(device)
             trainy = trainy.transpose(1, 3)
 
-            trainycl = torch.Tensor(ycl).to(device)
+            trainycl = torch.Tensor(ycl.float()).to(device)
             trainycl = trainycl.transpose(1, 3)
             # print(f"worker rank: {worker_rank} epoch: {epoch} batch: {batches_seen}")
             
@@ -381,10 +570,10 @@ def my_train():
             train_loss.append(metrics[0])
             train_mape.append(metrics[1])
             train_rmse.append(metrics[2])
+            break
             # print(batch_x.shape, batch_y.shape, batch_ycl.shape)
     
-        t2 = time.time()
-        train_time.append(t2 - t1)
+        
         
         valid_loss = []
         valid_mape = []
@@ -394,14 +583,15 @@ def my_train():
     
         s1 = time.time()
         for i, (x, y) in enumerate(val_loader):
-            testx = torch.Tensor(x).to(device)
+            testx = torch.Tensor(x.float()).to(device)
             testx = testx.transpose(1, 3)
-            testy = torch.Tensor(y).to(device)
+            testy = torch.Tensor(y.float()).to(device)
             testy = testy.transpose(1, 3)
             metrics = engine.eval(testx, testy[:, 0, :, :], testy)
             valid_loss.append(metrics[0])
             valid_mape.append(metrics[1])
             valid_rmse.append(metrics[2])
+            break
         s2 = time.time()
         
         val_time.append(s2 - s1)
@@ -416,7 +606,8 @@ def my_train():
         his_rmse.append(mvalid_rmse)
         his_loss.append(mvalid_loss)
         his_mape.append(mvalid_mape)
-
+        t2 = time.time()
+        train_time.append(t2 - t1)
         if (epoch - 1) % args.print_every == 0:
             if worker_rank == 0:
                 print("epoch: ", epoch, flush=True)
@@ -439,15 +630,21 @@ def my_train():
             count_lfx += 1
             if count_lfx > tolerance:
                 break
-    train_end = time.time()
+    
     if worker_rank == 0:
         with open("stats.txt", "w") as file:
-            file.write(f"training_time: {train_end - train_start}\n")
             file.write(f"opt_loss: {min(his_loss)}\n")
             file.write(f"opt_rmse: {min(his_rmse)}\n")
-            file.write(f"opt_mape: {min(his_mape)}")
+            file.write(f"opt_mape: {min(his_mape)}\n")
         
-        print("Total training time: ", train_end - train_start, flush=True)  
+        with open("per_epoch_stats.txt", "w") as file:
+            file.write(f"epoch, per_epoch_runtime, loss, rmse, mape\n")
+
+            for i in range(len(his_loss)):
+                file.write(f"{i}, {train_time[i]}, {his_loss[i]}, {his_rmse[i]}, {his_mape[i]}\n")
+                
+        
+        # print("Total training time: ", train_end - train_start, flush=True)  
 
        
 
