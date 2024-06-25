@@ -267,22 +267,24 @@ def load_pickle(pickle_file):
 
 def load_adj(pkl_filename):
     sensor_ids, sensor_id_to_ind, adj_mx = load_pickle(pkl_filename)
+    print(adj_mx.shape)
     return [asym_adj(adj_mx), asym_adj(np.transpose(adj_mx))]
 
 
 def load_dataset(dataset_dir,
                  batch_size,
                  valid_batch_size=None,
-                 test_batch_size=None):
+                 test_batch_size=None,
+                 train_x=None, train_y=None, val_x=None, val_y=None):
     data = {}
-    for category in ['train', 'val', 'test']:
-        cat_data = np.load(os.path.join(dataset_dir, category + '.npz'))
-        data['x_' + category] = cat_data['x']
-        data['y_' + category] = cat_data['y']
+    for category in [[train_x, train_y, "train"], [val_x, val_y, "val"]]:
+        # cat_data = np.load(os.path.join(dataset_dir, category + '.npz'))
+        data['x_' + category[2]] = category[0]
+        data['y_' + category[2]] = category[1]
     scaler = StandardScaler(mean=data['x_train'][..., 0].mean(),
                             std=data['x_train'][..., 0].std())
 
-    for category in ['train', 'val', 'test']:
+    for category in ['train', 'val']:
         data['x_' + category][...,
                               0] = scaler.transform(data['x_' + category][...,
                                                                           0])
@@ -295,8 +297,8 @@ def load_dataset(dataset_dir,
                                            data['y_train_cl'], batch_size)
     data['val_loader'] = DataLoaderM(data['x_val'], data['y_val'],
                                      valid_batch_size)
-    data['test_loader'] = DataLoaderM(data['x_test'], data['y_test'],
-                                      test_batch_size)
+    # data['test_loader'] = DataLoaderM(data['x_test'], data['y_test'],
+    #                                   test_batch_size)
     data['scaler'] = scaler
     return data
 
