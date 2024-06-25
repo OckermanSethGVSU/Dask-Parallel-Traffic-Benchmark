@@ -9,7 +9,7 @@ from net import DGCRN
 import setproctitle
 import os
 
-setproctitle.setproctitle("DGCRN@lifuxian")
+
 
 
 def str_to_bool(value):
@@ -116,21 +116,90 @@ parser.add_argument('--save', type=str, default='./save/', help='save path')
 
 parser.add_argument('--expid', type=str, default='1', help='experiment id')
 
+
+start_time = time.time()
 args = parser.parse_args()
 torch.set_num_threads(3)
 
-os.makedirs(args.save, exist_ok=True)
+# os.makedirs(args.save, exist_ok=True)
 
 rnn_size = args.rnn_size
 
 device = torch.device(args.device)
+device = None
+
+import pandas as pd
+df = pd.read_hdf(args.data)
+    # 0 is the latest observed sample.
+x_offsets = np.sort(
+    # np.concatenate(([-week_size + 1, -day_size + 1], np.arange(-11, 1, 1)))
+    np.concatenate((np.arange(-11, 1, 1),))
+)
+# Predict the next one hour
+y_offsets = np.sort(np.arange(1, 13, 1))
+
+num_samples, num_nodes = df.shape
+# print(num_samples, num_nodes)
+
+data = np.expand_dims(df.values, axis=-1)
+
+add_time_in_day = True
+add_day_in_week = False
+# print(df.values)
+data_list = [data]
+if add_time_in_day:
+    time_ind = (df.index.values - df.index.values.astype("datetime64[D]")) / np.timedelta64(1, "D")
+    time_in_day = np.tile(time_ind, [1, num_nodes, 1]).transpose((2, 1, 0))
+    data_list.append(time_in_day)
+if add_day_in_week:
+    day_in_week = np.zeros(shape=(num_samples, num_nodes, 7))
+    day_in_week[np.arange(num_samples), :, df.index.dayofweek] = 1
+    data_list.append(day_in_week)
+
+   
+data = np.concatenate(data_list, axis=-1)
+
+x, y = [], []
+# t is the index of the last observation.
+min_t = abs(min(x_offsets))
+max_t = abs(num_samples - abs(max(y_offsets)))  # Exclusive
+# print(f"Min_t: {min_t} - Max_t: {max_t}")
+# print("x-offset: ", x_offsets.shape)
+for t in range(min_t, max_t):
+    x_t = data[t + x_offsets, ...]
+    y_t = data[t + y_offsets, ...]
+    
+    x.append(x_t)
+    y.append(y_t)
+x = np.stack(x, axis=0)
+y = np.stack(y, axis=0)
+
+
+num_samples = x.shape[0]
+num_test = round(num_samples * 0.2)
+num_train = round(num_samples * 0.7)
+num_val = num_samples - num_test - num_train
+
+# train
+x_train, y_train = x[:num_train], y[:num_train]
+# val
+x_val, y_val = (
+    x[num_train: num_train + num_val],
+    y[num_train: num_train + num_val],
+)
 dataloader = load_dataset(args.data, args.batch_size, args.batch_size,
-                          args.batch_size)
+                          args.batch_size, 
+                          train_x=x_train, train_y=y_train,
+                          val_x=x_val, val_y=y_val)
+
+
 scaler = dataloader['scaler']
 
 predefined_A = load_adj(args.adj_data)
 predefined_A = [torch.tensor(adj).to(device) for adj in predefined_A]
 
+pre_end = time.time()
+print(f"Preprocessing took {pre_end - start_time}")
 
 def main(runid):
 
@@ -152,7 +221,7 @@ def main(runid):
                   rnn_size=rnn_size,
                   hyperGNN_dim=args.hyperGNN_dim)
 
-    print(args)
+    
 
     nParams = sum([p.nelement() for p in model.parameters()])
     print('Number of model parameters is', nParams)
@@ -163,6 +232,8 @@ def main(runid):
     
     print("start training...", flush=True)
     his_loss = []
+    his_rmse = []
+    his_mape = []
     val_time = []
     train_time = []
     minl = 1e5
@@ -170,18 +241,17 @@ def main(runid):
     tolerance = args.tolerance
     count_lfx = 0
     batches_seen = 0
-
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
-
     for i in range(1, args.epochs + 1):
         train_loss = []
         train_mape = []
         train_rmse = []
         t1 = time.time()
-       
-        for i, (x, y, ycl) in enumerate(train_loader):
+        dataloader['train_loader'].shuffle()
+        for iter, (x, y, ycl) in enumerate(
+                dataloader['train_loader'].get_iterator()):
+            print(batches_seen, flush=True)
             batches_seen += 1
+
             trainx = torch.Tensor(x).to(device)
             trainx = trainx.transpose(1, 3)
             trainy = torch.Tensor(y).to(device)
@@ -198,16 +268,16 @@ def main(runid):
             train_loss.append(metrics[0])
             train_mape.append(metrics[1])
             train_rmse.append(metrics[2])
+            
 
-        t2 = time.time()
-        train_time.append(t2 - t1)
-
+        
         valid_loss = []
         valid_mape = []
         valid_rmse = []
 
         s1 = time.time()
-        for i, (x, y) in enumerate(val_loader):
+        for iter, (x, y) in enumerate(
+                dataloader['val_loader'].get_iterator()):
             testx = torch.Tensor(x).to(device)
             testx = testx.transpose(1, 3)
             testy = torch.Tensor(y).to(device)
@@ -216,9 +286,9 @@ def main(runid):
             valid_loss.append(metrics[0])
             valid_mape.append(metrics[1])
             valid_rmse.append(metrics[2])
-        s2 = time.time()
-
-        val_time.append(s2 - s1)
+            
+        
+        t2 = time.time()
         mtrain_loss = np.mean(train_loss)
         mtrain_mape = np.mean(train_mape)
         mtrain_rmse = np.mean(train_rmse)
@@ -227,10 +297,14 @@ def main(runid):
         mvalid_mape = np.mean(valid_mape)
         mvalid_rmse = np.mean(valid_rmse)
         his_loss.append(mvalid_loss)
+        his_rmse.append(mvalid_rmse)
+        his_mape.append(mvalid_mape) 
+        train_time.append(t2 - t1)
+
 
         if (i - 1) % args.print_every == 0:
-            log = 'Epoch: {:03d}, Inference Time: {:.4f} secs'
-            print(log.format(i, (s2 - s1)))
+            # log = 'Epoch: {:03d}, Inference Time: {:.4f} secs'
+            # print(log.format(i, (s2 - s1)))
             log = 'Epoch: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, Valid Loss: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, Training Time: {:.4f}/epoch'
             print(log.format(i, mtrain_loss, mtrain_mape, mtrain_rmse,
                                 mvalid_loss, mvalid_mape, mvalid_rmse,
@@ -248,24 +322,25 @@ def main(runid):
             count_lfx += 1
             if count_lfx > tolerance:
                 break
+    end_time = time.time()
+    
+    with open("stats.txt", "w") as file:
+        file.write(f"opt_loss: {min(his_loss)}\n")
+        file.write(f"opt_rmse: {min(his_rmse)}\n")
+        file.write(f"opt_mape: {min(his_mape)}\n")
+    
+    with open("per_epoch_stats.txt", "w") as file:
+        file.write(f"epoch, per_epoch_runtime, loss, rmse, mape\n")
 
-    print("Average Training Time: {:.4f} secs/epoch".format(
-        np.mean(train_time)))
-    print("Average Inference Time: {:.4f} secs".format(np.mean(val_time)))
-
-    bestid = np.argmin(his_loss)
-    engine.model.load_state_dict(
-        torch.load(args.save + "exp" + str(args.expid) + "_" + str(runid) +
-                    ".pth",
-                    map_location='cpu'))
-
-    print("Training finished")
-    print("The valid loss on best model is {}, epoch:{}".format(
-        str(round(his_loss[bestid], 4)), epoch_best))
+        for i in range(len(his_loss)):
+            file.write(f"{i}, {train_time[i]}, {his_loss[i]}, {his_rmse[i]}, {his_mape[i]}\n")
 
 
-
-   
+    with open("stats.txt", "a") as file:
+        file.write(f"total_time: {end_time - start_time}\n")
+        file.write(f"pre_processing_time: {pre_end - start_time}\n")
+        file.write(f"training_time: {end_time - pre_end}\n")
+            
 
 
 if __name__ == "__main__":
@@ -276,5 +351,5 @@ if __name__ == "__main__":
     mae = []
     mape = []
     rmse = []
-    main(1)
-   
+    main(0)
+        
