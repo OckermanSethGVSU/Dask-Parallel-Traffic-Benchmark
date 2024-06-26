@@ -2,10 +2,7 @@ import torch
 import numpy as np
 import argparse
 import time
-from util import *
-from trainer import Trainer
-# from dask_preprocess import preproccess
-from uniq_net import DGCRN
+
 import setproctitle
 import os
 
@@ -46,7 +43,9 @@ from dask.array.lib.stride_tricks import sliding_window_view
 import pandas as pd
 import numpy as np
 import time
-
+from util import *
+from trainer import Trainer
+from net import DGCRN
 
 class FeedForwardNN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
@@ -267,18 +266,22 @@ args = parser.parse_args()
 # device = torch.device(args.device)
 
 def readPD():
-    # df = pd.read_hdf("/home/seth/Documents/research/Argonne/DCRNN/data/speed.h5", key="df")
-    df = pd.read_hdf("new_speed.h5", key="data")
-    df = df.astype('float32')
+    # df = pd.read_hdf("../LA_ALL_2018/speed.h5", key="df")
+    df = pd.read_hdf("../data/metr-la.h5", key="df")
+    # df = pd.read_hdf("new_speed.h5", key="data")
+    # df = df.astype('float32')
     df.index.freq='5min'  # Manually assign the index frequency
     df.index.freq = df.index.inferred_freq
     return df
 
-device=None
+    # cols = df.shape[1]
+    # return df.iloc[:,:int(cols*0.25)]
+
+# device=None
 
 # scaler = dataloader['scaler']
-npar = 1
-file_path = "/home/seth/Documents/research/Argonne/DCRNN/DATA/speed.h5"
+# npar = 1
+# file_path = "/home/seth/Documents/research/Argonne/DCRNN/DATA/speed.h5"
 # file_path = "metr-la.h5"
 def main(runid):
     
@@ -288,21 +291,18 @@ def main(runid):
     
     # prefix = "/home/treewalker/Dask-Parallel-Traffic-Benchmark/methods/pol_DGCRN/"
     
-    # # client = Client(scheduler_file = f"cluster.info")
-    # client = Client(cluster)
+    client = Client(scheduler_file = f"cluster.info")
+
     # order matters - I am preserving the depencies
-
-    # for f in ['layer.py', 'net.py', 'util.py', 'uniq_net.py', 'trainer.py',]:
-    #     client.upload_file(f)
-    # with performance_report(filename="dask-report.html"):
-    #     futures = dispatch.run(client, my_train, backend="gloo")
-    #     rh.process_results(".", futures, raise_errors=False)
-
-
-    cluster = LocalCluster(n_workers=npar)
-
-    client = Client(cluster)
     
+    
+    # with performance_report(filename="dask-report.html"):
+    
+
+    # cluster = LocalCluster(n_workers=npar)
+
+    # client = Client(cluster)
+    print("Step 0: Reading DF")
     from dask.delayed import delayed
     dfs = delayed(readPD)()
     df = dd.from_delayed(dfs)
@@ -425,9 +425,9 @@ def main(runid):
     mean = mean.compute()
     std = std.compute()
 
-    print("Preprocessing complete; Training Starting")
-
     pre_end = time.time()
+    print(f"Preprocessing complete in {pre_end - start_time}; Training Starting", flush=True)
+    print("X shape: ", x_train.shape )
 
     
     # x_train = x_train.compute()
@@ -447,14 +447,18 @@ def main(runid):
     
 
     # args = (x_train, y_train, ycl_train, x_val, y_val)
-    
-    futures = dispatch.run(client, my_train, x_train=x_train, mean=mean, std=std, y_train=y_train, ycl_train=ycl_train, x_val=x_val, y_val=y_val, backend='gloo')
+    for f in ['layer.py', 'net.py', 'util.py', 'trainer.py']:
+        client.upload_file(f)
+        print(f"{f} uploaded")
+
+
+    futures = dispatch.run(client, my_train, x_train=x_train, mean=mean, std=std, y_train=y_train, ycl_train=ycl_train, x_val=x_val, y_val=y_val, backend="gloo")
     key = uuid.uuid4().hex
     rh = results.DaskResultsHandler(key)
     rh.process_results(".", futures, raise_errors=False)
+    end_time = time.time()
    
     client.shutdown()
-    end_time = time.time()
     
     with open("stats.txt", "a") as file:
         file.write(f"total_time: {end_time - start_time}\n")
@@ -467,7 +471,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
 
     
     
-
+    npar = int(args.npar)
     # return None
     scaler = StandardScaler(mean=mean, std=std)
     train_dataset = TrainDataset(x_train, y_train, ycl_train)
@@ -480,18 +484,23 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
     
     worker_rank = int(dist.get_rank())
 
-    # device = f"cuda:{worker_rank % 4}"
+    device = f"cuda:{worker_rank % 4}"
     # print("Device: ", device, flush=True)
     
     predefined_A = load_adj(args.adj_data)
     predefined_A = [torch.tensor(adj).to(device) for adj in predefined_A]
-
+    # print("setup adj matrix")
     train_sampler = DistributedSampler(train_dataset, num_replicas=npar, rank=worker_rank)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler)
 
+    train_per_epoch = len(train_loader)
     val_sampler = DistributedSampler(val_dataset, num_replicas=npar, rank=worker_rank)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler)
-
+    val_per_epoch = len(val_loader)
+    if worker_rank == 0:
+        print("Train batches: ", len(train_loader))
+        print("Val batches: ", len(val_loader))
+    # print("Setup Samplers" ,flush=True)
     model = DGCRN(args.gcn_depth,
                 args.num_nodes,
                 device,
@@ -508,8 +517,10 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
                 tanhalpha=args.tanhalpha,
                 cl_decay_steps=args.cl_decay_steps,
                 rnn_size=args.rnn_size,
-                hyperGNN_dim=args.hyperGNN_dim)
-    model = DDP(model).to(device)
+                hyperGNN_dim=args.hyperGNN_dim).to(device)
+    
+    model = DDP(model, device_ids=[device], gradient_as_bucket_view=True)
+    # print("Moved model to device", flush=True)
     engine = Trainer(model, args.learning_rate, args.weight_decay, args.clip,
                     args.step_size1, args.seq_out_len, scaler, device,
                     args.cl, args.new_training_method)
@@ -528,12 +539,15 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
     batches_seen = 0
 
 
-    print("about to start epochs", flush=True)
+    if worker_rank ==0:
+        print("about to start epochs", flush=True)
 
-    
+   
     # train_start = time.time()
     for epoch in range(1, num_epochs + 1):
-            
+        if worker_rank == 0:
+            print("Epoch: ", epoch, flush=True)
+            print("******************************************************", flush=True)
         train_sampler.set_epoch(epoch)
         
         
@@ -545,8 +559,8 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
     
         
         for i, (x, y, ycl) in enumerate(train_loader):
-
-            print(f"working on batch {i}")
+            if worker_rank == 0:
+                print(f"\r Epoch {epoch}: Train {((i / train_per_epoch) * 100):.2f}%, shape: {x.shape}", flush=True, end="")
             trainx = torch.Tensor(x.float()).to(device)
             trainx = trainx.transpose(1, 3)
             trainy = torch.Tensor(y.float()).to(device)
@@ -554,6 +568,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
 
             trainycl = torch.Tensor(ycl.float()).to(device)
             trainycl = trainycl.transpose(1, 3)
+            # print("tensors moved", flush=True)
             # print(f"worker rank: {worker_rank} epoch: {epoch} batch: {batches_seen}")
             
     
@@ -570,7 +585,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
             train_loss.append(metrics[0])
             train_mape.append(metrics[1])
             train_rmse.append(metrics[2])
-            break
+            
             # print(batch_x.shape, batch_y.shape, batch_ycl.shape)
     
         
@@ -583,6 +598,8 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
     
         s1 = time.time()
         for i, (x, y) in enumerate(val_loader):
+            if worker_rank == 0:
+                print(f"\r Epoch {epoch}: Val {((i / val_per_epoch) * 100):.2f}%", flush=True, end="")
             testx = torch.Tensor(x.float()).to(device)
             testx = testx.transpose(1, 3)
             testy = torch.Tensor(y.float()).to(device)
@@ -591,7 +608,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
             valid_loss.append(metrics[0])
             valid_mape.append(metrics[1])
             valid_rmse.append(metrics[2])
-            break
+            
         s2 = time.time()
         
         val_time.append(s2 - s1)
@@ -610,8 +627,8 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
         train_time.append(t2 - t1)
         if (epoch - 1) % args.print_every == 0:
             if worker_rank == 0:
-                print("epoch: ", epoch, flush=True)
-                print(f"val - loss: {mvalid_loss}, mape: {mvalid_mape}, rmse: {mvalid_rmse}",flush=True)
+                # print("epoch: ", epoch, flush=True)
+                print(f"\nEpoch {epoch} VAL |  time: {t2 - t1} loss: {mvalid_loss}, mape: {mvalid_mape}, rmse: {mvalid_rmse}",flush=True)
             # log = 'Rank: {:02d}, Epoch: {:03d}, Inference Time: {:.4f} secs'
             # print(log.format(worker_rank, epoch, (s2 - s1)))
             # log = 'Rank: {:02d}, Epoch: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, Valid Loss: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, Training Time: {:.4f}/epoch'
