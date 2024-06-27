@@ -266,18 +266,18 @@ args = parser.parse_args()
 
 def readPD():
     # df = pd.read_hdf("/home/seth/Documents/research/Argonne/DCRNN/data/speed.h5", key="df")
-    df = pd.read_hdf("metr-la.h5", key="df")
+    # df = pd.read_hdf("../data/metr-la.h5", key="df")
+    # df = pd.read_hdf("../speed.h5", key="df")
+    df = pd.read_hdf("../LA_ALL_2018/speed.h5", key="df")
     df = df.astype('float32')
     df.index.freq='5min'  # Manually assign the index frequency
     df.index.freq = df.index.inferred_freq
     return df
 
-device=None
+# device=None
 
-# scaler = dataloader['scaler']
 
-file_path = "/home/seth/Documents/research/Argonne/DCRNN/DATA/speed.h5"
-# file_path = "metr-la.h5"
+
 def main(runid):
     
     start_time = time.time()
@@ -299,6 +299,7 @@ def main(runid):
     if args.mode == 'local':
         cluster = LocalCluster(n_workers=args.npar)
         client = Client(cluster)
+        device = None
     elif args.mode == 'dist':
         client = Client(scheduler_file = f"cluster.info")
     else:
@@ -420,7 +421,7 @@ def main(runid):
     
     # x_val = x_val)
     print("\rStep 1c: Concat, window, standardize" , flush=True)
-    mean, std, x_train, y_train, ycl_train, x_val, y_val = client.persist([mean, std, x_train, y_train, ycl_train, x_val, y_val])
+    mean, std, x_train, y_train, ycl_train, x_val, y_val = client.persist([mean, std, x_train, y_train, ycl_train, x_val, y_val], backend="gloo")
     wait([mean, std, x_train, y_train, ycl_train, x_val, y_val])
     
     # time.sleep(30)
@@ -449,8 +450,12 @@ def main(runid):
     
 
     # args = (x_train, y_train, ycl_train, x_val, y_val)
-    
-    futures = dispatch.run(client, my_train, x_train=x_train, mean=mean, std=std, y_train=y_train, ycl_train=ycl_train, x_val=x_val, y_val=y_val, backend='gloo')
+    for f in ['util.py','layer.py', 'net.py', 'trainer.py']:
+        client.upload_file(f)
+        print(f"{f} uploaded", flush=True)
+
+
+    futures = dispatch.run(client, my_train, x_train=x_train, mean=mean, std=std, y_train=y_train, ycl_train=ycl_train, x_val=x_val, y_val=y_val)
     key = uuid.uuid4().hex
     rh = results.DaskResultsHandler(key)
     rh.process_results(".", futures, raise_errors=False)
@@ -482,7 +487,8 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
     
     worker_rank = int(dist.get_rank())
 
-    # device = f"cuda:{worker_rank % 4}"
+    device = f"cuda:{worker_rank % 4}"
+    torch.cuda.set_device(device)
     # print("Device: ", device, flush=True)
     
     predefined_A = load_adj(args.adj_data)
@@ -510,8 +516,8 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
                 tanhalpha=args.tanhalpha,
                 cl_decay_steps=args.cl_decay_steps,
                 rnn_size=args.rnn_size,
-                hyperGNN_dim=args.hyperGNN_dim).to(device)
-    model = DDP(model, gradient_as_bucket_view=True)
+                hyperGNN_dim=args.hyperGNN_dim)
+    model = DDP(model, device_ids=[device], gradient_as_bucket_view=True).to(device)
     engine = Trainer(model, args.learning_rate, args.weight_decay, args.clip,
                     args.step_size1, args.seq_out_len, scaler, device,
                     args.cl, args.new_training_method)
@@ -532,9 +538,10 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
 
     if worker_rank == 0:
         print("Model created successfully; About to begin epochs", flush=True)
-    
+    torch.cuda.set_device(device)
     # train_start = time.time()
     for epoch in range(1, num_epochs + 1):
+        torch.cuda.set_device(device)
         if worker_rank == 0:
             print("\nEpoch: ", epoch, flush=True)
             print("******************************************************", flush=True)
@@ -549,7 +556,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
     
         
         for i, (x, y, ycl) in enumerate(train_loader):
-
+           
             if worker_rank == 0:
                 print(f"\rTrain batch {i + 1}/{train_per_epoch}", flush=True, end="")
             trainx = torch.Tensor(x.float()).to(device)
@@ -575,7 +582,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
             train_loss.append(metrics[0])
             train_mape.append(metrics[1])
             train_rmse.append(metrics[2])
-            if i == 2: break
+            # if i == 2: break
             # print(batch_x.shape, batch_y.shape, batch_ycl.shape)
     
         
@@ -601,7 +608,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
             valid_loss.append(metrics[0])
             valid_mape.append(metrics[1])
             valid_rmse.append(metrics[2])
-            if i == 2: break
+            # if i == 2: break
         s2 = time.time()
         
         val_time.append(s2 - s1)
