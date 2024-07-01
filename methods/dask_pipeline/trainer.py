@@ -1,7 +1,7 @@
 import torch.optim as optim
 import math
-from uniq_net import *
-import util
+from net import *
+import my_util
 
 
 class Trainer():
@@ -18,11 +18,12 @@ class Trainer():
                  new_training_method=False):
         self.scaler = scaler
         self.model = model
-        self.model.to(device)
+        self.device = device
+        # self.model.to(device)
         self.optimizer = optim.Adam(self.model.parameters(),
                                     lr=lrate,
                                     weight_decay=wdecay)
-        self.loss = util.masked_mae
+        self.loss = my_util.masked_mae
         self.clip = clip
         self.step = step_size
 
@@ -33,6 +34,8 @@ class Trainer():
         self.new_training_method = new_training_method
 
     def train(self, input, real_val, ycl, idx=None, batches_seen=None):
+        # print("Top of train in trainer",flush=True)
+
         self.iter += 1
 
         if self.iter % self.step == 0 and self.task_level < self.seq_out_len:
@@ -43,18 +46,20 @@ class Trainer():
         self.model.train()
         self.optimizer.zero_grad()
         if self.cl:
+            # print("about to call forward pass in cl",flush=True)
             output = self.model(input,
                                 idx=idx,
                                 ycl=ycl,
                                 batches_seen=self.iter,
                                 task_level=self.task_level)
         else:
+            # print(f"{self.device} about to call forward pass",flush=True)
             output = self.model(input,
                                 idx=idx,
                                 ycl=ycl,
                                 batches_seen=self.iter,
                                 task_level=self.seq_out_len)
-
+        # print(f"{self.device} got output ", flush=True)
         output = output.transpose(1, 3)
         real = torch.unsqueeze(real_val, dim=1)
         predict = self.scaler.inverse_transform(output)
@@ -63,16 +68,16 @@ class Trainer():
 
             loss = self.loss(predict[:, :, :, :self.task_level],
                              real[:, :, :, :self.task_level], 0.0)
-            mape = util.masked_mape(predict[:, :, :, :self.task_level],
+            mape = my_util.masked_mape(predict[:, :, :, :self.task_level],
                                     real[:, :, :, :self.task_level],
                                     0.0).item()
-            rmse = util.masked_rmse(predict[:, :, :, :self.task_level],
+            rmse = my_util.masked_rmse(predict[:, :, :, :self.task_level],
                                     real[:, :, :, :self.task_level],
                                     0.0).item()
         else:
             loss = self.loss(predict, real, 0.0)
-            mape = util.masked_mape(predict, real, 0.0).item()
-            rmse = util.masked_rmse(predict, real, 0.0).item()
+            mape = my_util.masked_mape(predict, real, 0.0).item()
+            rmse = my_util.masked_rmse(predict, real, 0.0).item()
 
         loss.backward()
 
@@ -84,6 +89,8 @@ class Trainer():
         return loss.item(), mape, rmse
 
     def eval(self, input, real_val, ycl):
+        
+
         self.model.eval()
         with torch.no_grad():
             output = self.model(input, ycl=ycl)
@@ -91,6 +98,6 @@ class Trainer():
         real = torch.unsqueeze(real_val, dim=1)
         predict = self.scaler.inverse_transform(output)
         loss = self.loss(predict, real, 0.0)
-        mape = util.masked_mape(predict, real, 0.0).item()
-        rmse = util.masked_rmse(predict, real, 0.0).item()
+        mape = my_util.masked_mape(predict, real, 0.0).item()
+        rmse = my_util.masked_rmse(predict, real, 0.0).item()
         return loss.item(), mape, rmse

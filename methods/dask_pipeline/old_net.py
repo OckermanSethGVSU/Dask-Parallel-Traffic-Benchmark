@@ -34,11 +34,11 @@ class DGCRN(nn.Module):
                  hyperGNN_dim=16):
         super(DGCRN, self).__init__()
         self.output_dim = 1
-        torch.cuda.set_device(device)
+
         self.num_nodes = num_nodes
         self.dropout = dropout
         self.predefined_A = predefined_A
-        self.eye_matrix = torch.eye(self.num_nodes, device=device).to(device)
+
         self.seq_length = seq_length
 
         self.emb1 = nn.Embedding(self.num_nodes, node_dim)
@@ -109,13 +109,9 @@ class DGCRN(nn.Module):
         self.gcn_depth = gcn_depth
 
     def preprocessing(self, adj, predefined_A):
-        
-
-        
-        # adj = adj + self.eye_matrix
-        # adj = adj / torch.unsqueeze(adj.sum(-1), -1)
-        
-        return [ (adj + self.eye_matrix) / torch.unsqueeze((adj + self.eye_matrix).sum(-1), -1), predefined_A]
+        adj = adj + torch.eye(self.num_nodes).to(self.device)
+        adj = adj / torch.unsqueeze(adj.sum(-1), -1)
+        return [adj, predefined_A]
 
     def step(self,
              input,
@@ -125,7 +121,7 @@ class DGCRN(nn.Module):
              type='encoder',
              idx=None,
              i=None):
-        torch.cuda.set_device(self.device)
+
         x = input
 
         x = x.transpose(1, 2).contiguous()
@@ -198,7 +194,7 @@ class DGCRN(nn.Module):
                 ycl=None,
                 batches_seen=None,
                 task_level=12):
-        torch.cuda.set_device(self.device)
+
         predefined_A = self.predefined_A
         x = input
 
@@ -207,18 +203,16 @@ class DGCRN(nn.Module):
                                                    self.hidden_size)
 
         outputs = None
-        # print(f"{self.device} | seq length: ", self.seq_length, flush=True)
         for i in range(self.seq_length):
-            # print("i: ", i, flush=True)
             Hidden_State, Cell_State = self.step(torch.squeeze(x[..., i]),
                                                  Hidden_State, Cell_State,
                                                  predefined_A, 'encoder', idx,
                                                  i)
 
-            # if outputs is None:
-            #     outputs = Hidden_State.unsqueeze(1)
-            # else:
-            #     outputs = torch.cat((outputs, Hidden_State.unsqueeze(1)), 1)
+            if outputs is None:
+                outputs = Hidden_State.unsqueeze(1)
+            else:
+                outputs = torch.cat((outputs, Hidden_State.unsqueeze(1)), 1)
 
         go_symbol = torch.zeros((batch_size, self.output_dim, self.num_nodes),
                                 device=self.device)
@@ -226,9 +220,8 @@ class DGCRN(nn.Module):
 
         decoder_input = go_symbol
 
-        outputs_final = torch.empty((batch_size * self.num_nodes, task_level, 1), device=self.device, dtype=decoder_input.dtype)
+        outputs_final = []
 
-        # print("task level: ", task_level, flush=True)
         for i in range(task_level):
             try:
                 decoder_input = torch.cat([decoder_input, timeofday[..., i]],
@@ -245,13 +238,13 @@ class DGCRN(nn.Module):
             decoder_input = decoder_output.view(batch_size, self.num_nodes,
                                                 self.output_dim).transpose(
                                                     1, 2)
-            outputs_final[:, i, :] = decoder_output
+            outputs_final.append(decoder_output)
             if self.training and self.use_curriculum_learning:
                 c = np.random.uniform(0, 1)
                 if c < self._compute_sampling_threshold(batches_seen):
                     decoder_input = ycl[:, :1, :, i]
 
-        # outputs_final = torch.stack(outputs_final, dim=1)
+        outputs_final = torch.stack(outputs_final, dim=1)
 
         outputs_final = outputs_final.view(batch_size, self.num_nodes,
                                            task_level,
