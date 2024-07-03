@@ -279,3 +279,37 @@ class DGCRN(nn.Module):
     def _compute_sampling_threshold(self, batches_seen):
         return self.cl_decay_steps / (
             self.cl_decay_steps + np.exp(batches_seen / self.cl_decay_steps))
+    
+    def save_checkpoint(self, filepath, epoch, batches_seen, optimizer=None):
+        """
+        Save the model checkpoint to a file.
+
+        :param filepath: Path to the file where the checkpoint will be saved.
+        :param epoch: Current epoch number.
+        :param optimizer: Optimizer state to save along with model parameters (optional).
+        """
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': self.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+            'batches_seen' : batches_seen
+        }
+        # print(self.state_dict())
+        torch.save(checkpoint, filepath)
+        print(f"\ndaCheckpoint saved to {filepath}")
+    
+    def load_checkpoint(self, filepath, optimizer=None):
+        """
+        Load the model and optimizer states from a checkpoint file.
+
+        :param filepath: Path to the checkpoint file.
+        :param optimizer: Optimizer to load state into (optional).
+        """
+        checkpoint = torch.load(filepath)
+        self.load_state_dict(checkpoint['model_state_dict'])
+        epoch = checkpoint['epoch']
+        batches_seen = checkpoint['batches_seen']
+        if optimizer and 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(f"Checkpoint loaded from {filepath} at epoch {epoch}")
+        return epoch, batches_seen, optimizer

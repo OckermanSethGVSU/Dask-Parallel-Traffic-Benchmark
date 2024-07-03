@@ -245,7 +245,7 @@ parser.add_argument('--adj_data',
 parser.add_argument('--propalpha', type=float, default=0.05, help='prop alpha')
 parser.add_argument('--npar', type=int, default=1, help='prop alpha')
 parser.add_argument('--mode', type=str, default="local")
-
+parser.add_argument('--load_path', type=str, default=None)
 
 args = parser.parse_args()
 # torch.set_num_threads(3)
@@ -461,6 +461,8 @@ def main(runid):
             
 
 def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None, mean=None, std=None, start_time=None, pre_end=None):
+    print("Top of my train", flush=True)
+
     worker_rank = int(dist.get_rank())
     device = f"cuda:{worker_rank % 4}"
     torch.cuda.set_device(worker_rank % 4)
@@ -490,6 +492,9 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
     val_sampler = DistributedSampler(val_dataset, num_replicas=args.npar, rank=worker_rank)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=0)
     val_per_epoch = len(val_loader)
+
+
+    
     model = DGCRN(args.gcn_depth,
                 args.num_nodes,
                 device,
@@ -508,11 +513,14 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
                 rnn_size=args.rnn_size,
                 hyperGNN_dim=args.hyperGNN_dim)
     
-    
+    print("model created", flush=True)
+
     model = DDP(model, gradient_as_bucket_view=True).to(device)
+    print("ddp created", flush=True)
     engine = Trainer(model, args.learning_rate, args.weight_decay, args.clip,
                     args.step_size1, args.seq_out_len, scaler, device,
                     args.cl, args.new_training_method)
+    print("engine created", flush=True)
     worker_rank = int(dist.get_rank()) 
 
     his_loss = []
@@ -532,7 +540,13 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
     tolerance = args.tolerance
     count_lfx = 0
     batches_seen = 0
-
+    
+    start_epoch = 1
+    
+    if args.load_path:
+        print("Loading saved state", flush=True)
+        start_epoch, batches_seen, engine.optimizer = model.module.load_checkpoint(args.load_path, engine.optimizer)
+    
 
     if worker_rank == 0:
         print("Model created successfully; About to begin epochs", flush=True)
@@ -541,7 +555,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
                 file.write(f"epoch, per_epoch_runtime, train_loss, train_rmse, train_mape, val_loss, val_rmse, val_mape\n")
 
     # train_start = time.time()
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(start_epoch, num_epochs + 1):
         if worker_rank == 0:
             print("\nEpoch: ", epoch, flush=True)
             print("******************************************************", flush=True)
@@ -556,7 +570,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
     
         
         for i, (x, y, ycl) in enumerate(train_loader):
-
+            batches_seen += 1
             if worker_rank == 0:
                 print(f"\rTrain batch {i + 1}/{train_per_epoch}", flush=True, end="")
             trainx = torch.Tensor(x.float()).to(device)
@@ -582,7 +596,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
             train_loss.append(metrics[0])
             train_mape.append(metrics[1])
             train_rmse.append(metrics[2])
-            # if i == 2: break
+            if i == 2: break
             # print(batch_x.shape, batch_y.shape, batch_ycl.shape)
     
         
@@ -610,7 +624,7 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
             valid_rmse.append(metrics[2])
 
 
-            # if i == 2: break
+            if i == 2: break
 
             
         s2 = time.time()
@@ -633,6 +647,8 @@ def my_train(x_train=None, y_train=None, ycl_train=None, x_val=None, y_val=None,
         overall_t_rmse.append(mtrain_rmse)
         t2 = time.time()
         if worker_rank == 0:
+            
+            model.module.save_checkpoint(f"model_{epoch}.pth", epoch, batches_seen, engine.optimizer)
             with open("per_epoch_stats.txt", "a") as file:
                 # file.write(f"epoch, per_epoch_runtime, train_loss, train_rmse, train_mape, val_loss, val_rmse, val_mape\n")
                 file.write(f"{epoch}, {t2 - t1}, {mtrain_loss}, {mtrain_mape}, {mtrain_rmse}, {mvalid_loss}, {mvalid_rmse}, {mvalid_mape}\n")

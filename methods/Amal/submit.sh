@@ -15,7 +15,7 @@ total=$((num_worker * nodes))
 NDEPTH=$((32 / num_worker))
 
 
-cd /eagle/projects/radix-io/sockerman/Dask-Parallel-Traffic-Benchmark/methods/dask_pipeline/
+cd /eagle/projects/radix-io/sockerman/Dask-Parallel-Traffic-Benchmark/methods/Amal/
 DIR=$PWD
 
 DATE=$(date +"%Y-%m-%d_%T")
@@ -25,6 +25,7 @@ mkdir -p $dir
 # cp train.out $dir/
 # cp train.err $dir/
 cp *.py $dir/
+cp *.pth $dir/
 cp actual_submit_nodes_${nodes}_${num_worker}.sh $dir/
 cd $dir
 
@@ -69,7 +70,8 @@ echo "$total workers launched"
 # mpiexec -n 1 --ppn 1 -d ${NDEPTH} --exclusive --hosts $scheduler_node `which python3` distributed_ddp_train.py --adj_data ../data/cali_adj_mat.pkl --num_nodes 2790 --epochs 30 --print_every 1 --rnn_size 2 --batch_size 64 --npar $total 
 
 # CALI (2GB)
-mpiexec -n 1 --ppn 1 -d ${NDEPTH} --exclusive --hosts $scheduler_node `which python3` distributed_ddp_train.py --adj_data ../LA_ALL_2018/adj_mat.pkl --num_nodes 2716 --epochs 30 --print_every 1 --rnn_size 2 --batch_size 16 --npar $total --mode dist
+mpiexec -n 1 --ppn 1 -d ${NDEPTH} --exclusive --hosts $scheduler_node `which python3` distributed_ddp_train.py --adj_data ../LA_ALL_2018/adj_mat.pkl --data ../LA_ALL_2018/speed.h5 --num_nodes 2716 --epochs 30 --print_every 1 --rnn_size 2 --batch_size 16 --npar $total --mode dist 
+# --load_path model_7.pth
 # mpiexec -n 1 --ppn 1 -d ${NDEPTH} --exclusive --hosts $scheduler_node `which python3` old_with_ddp.py --adj_data ../LA_ALL_2018/adj_mat.pkl --num_nodes 2716 --epochs 30 --print_every 1 --rnn_size 2 --batch_size 64 --npar $total 
 client_pid=$!
 
